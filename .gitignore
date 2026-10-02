@@ -1,0 +1,15 @@
+# 构建产物
+dist/
+tools/GenCursors.exe
+
+# 中间文件
+*.obj
+*.pdb
+*.log
+qa_sheet.png
+
+# IDE / 系统
+.vs/
+.vscode/
+Thumbs.db
+Desktop.ini

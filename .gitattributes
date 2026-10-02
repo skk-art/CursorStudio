@@ -1,0 +1,12 @@
+* text=auto
+
+# 光标与图片资源按二进制处理，避免换行符被改写
+*.cur binary
+*.ani binary
+*.png binary
+*.ico binary
+*.exe binary
+
+# 批处理文件保持 CRLF（cmd 解析需要）
+*.cmd text eol=crlf
+*.bat text eol=crlf

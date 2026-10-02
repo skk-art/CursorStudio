@@ -1,0 +1,5 @@
+classic|经典白
+sakura|樱花粉
+mint|薄荷绿
+night|暗夜紫
+sunset|活力橙
