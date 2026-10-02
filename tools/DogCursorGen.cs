@@ -4,7 +4,8 @@
 //   2. 洪水填充从边缘抠掉米色背景与浅色投影（狗有完整深色轮廓线，填充不会漏进体内）
 //   3. 只保留最大不透明连通域（去掉 zZ、问号、爱心等漂浮装饰）
 //   4. 1px 羽化边缘，裁切到内容包围盒
-//   5. 高质量缩放到 32x32，按角色热点生成 .cur（复用 CursorCore.BuildCurBytes）
+//   5. 绘制到 48x48 画布（图案为 32px 适配尺寸的 1.5 倍，完整显示）
+//   6. 热点位于图案右上角，并绘制高光标记（白核+深棕环+柔光）标示点击区域
 // 用法: DogCursorGen.exe <项目根目录>
 using System;
 using System.Collections.Generic;
@@ -20,21 +21,27 @@ static class DogCursorGen
     {
         public string Name, Role;
         public RectangleF Norm;     // 在设定图上的归一化裁切区域
-        public float HotFx, HotFy;  // 热点在内容包围盒中的比例（鼻尖）
-        public Region(string name, string role, float x, float y, float w, float h, float fx, float fy)
-        { Name = name; Role = role; Norm = new RectangleF(x, y, w, h); HotFx = fx; HotFy = fy; }
+        public float HotFx, HotFy;  // 热点（点击区域）在内容包围盒中的比例：头部右上角
+        public bool FillCrop;       // true = 1.5 倍放大、顶部锚定裁掉下部（头部充满光标）
+        public Region(string name, string role, float x, float y, float w, float h, float fx, float fy, bool crop)
+        { Name = name; Role = role; Norm = new RectangleF(x, y, w, h); HotFx = fx; HotFy = fy; FillCrop = crop; }
     }
 
     // 坐标基于 1536x1024 设定图目测，QA 网格中校验后微调
+    // 注：Windows 把所有光标统一渲染为系统指针尺寸（150% DPI 下 48px），
+    //     文件尺寸无法突破；FillCrop 通过 1.5 倍绘制+裁切让主体真正变大。
+    //     头像类角色放大 1.5 倍会切掉耳朵，故仅 Arrow 使用 FillCrop。
     static readonly Region[] Regions = {
-        new Region("arrow_front", "Arrow",       0.010f, 0.075f, 0.200f, 0.490f, 0.50f, 0.35f),
-        new Region("help_dimu",   "Help",        0.018f, 0.595f, 0.150f, 0.240f, 0.52f, 0.63f),
-        new Region("hand_happy",  "Hand",        0.163f, 0.595f, 0.140f, 0.240f, 0.50f, 0.58f),
-        new Region("app_curious", "AppStarting", 0.287f, 0.575f, 0.130f, 0.255f, 0.47f, 0.58f),
-        new Region("wait_sleep",  "Wait",        0.425f, 0.635f, 0.150f, 0.215f, 0.52f, 0.72f),
+        new Region("arrow_front", "Arrow",       0.010f, 0.075f, 0.200f, 0.490f, 0.72f, 0.13f, true),
+        new Region("help_dimu",   "Help",        0.018f, 0.595f, 0.150f, 0.240f, 0.74f, 0.13f, false),
+        new Region("hand_happy",  "Hand",        0.163f, 0.595f, 0.140f, 0.240f, 0.74f, 0.13f, false),
+        new Region("app_curious", "AppStarting", 0.287f, 0.575f, 0.130f, 0.255f, 0.74f, 0.13f, false),
+        new Region("wait_sleep",  "Wait",        0.425f, 0.635f, 0.150f, 0.215f, 0.70f, 0.22f, false),
     };
 
-    const int BgTol = 48;   // 与参考色的 RGB 欧氏距离阈值
+    const int BgTol = 48;       // 与参考色的 RGB 欧氏距离阈值
+    const int Canvas = 48;      // 角色光标画布
+    const double Zoom = 1.5;    // 图案相对 32px 适配尺寸的放大倍数
 
     static int Main(string[] args)
     {
@@ -45,69 +52,101 @@ static class DogCursorGen
         Directory.CreateDirectory(outDir);
         Directory.CreateDirectory(srcDir);
 
+        List<Bitmap> finals = new List<Bitmap>();
+        List<Point> hotSpots = new List<Point>();
+        List<string> labels = new List<string>();
+
         using (Bitmap sheet = new Bitmap(sheetPath))
         {
-            List<Bitmap> keyed = new List<Bitmap>();
-            List<Point> hots = new List<Point>();
             foreach (Region r in Regions)
             {
                 Point hot;
-                Bitmap k = CropKey(sheet, r, out hot);
-                k.Save(Path.Combine(srcDir, r.Name + ".png"), ImageFormat.Png);
-                keyed.Add(k); hots.Add(hot);
-
-                // 缩放到 32x32 并生成 .cur
-                using (Bitmap cur32 = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
-                using (Graphics g = Graphics.FromImage(cur32))
+                using (Bitmap k = CropKey(sheet, r, out hot))
                 {
-                    g.CompositingQuality = CompositingQuality.HighQuality;
-                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    DrawScaled(g, k, new Rectangle(0, 0, 32, 32));
-                    int hx = Math.Max(0, Math.Min(31, (int)Math.Round(hot.X * 32.0 / k.Width)));
-                    int hy = Math.Max(0, Math.Min(31, (int)Math.Round(hot.Y * 32.0 / k.Height)));
+                    k.Save(Path.Combine(srcDir, r.Name + ".png"), ImageFormat.Png);
+
+                    // 48x48 画布。FillCrop：1.5 倍放大、顶部锚定（头部完整、裁掉下部身体）；
+                    // 其余：完整居中显示
+                    double s = (r.FillCrop ? Zoom : 1.0) * Canvas / (double)Math.Max(k.Width, k.Height);
+                    int dw = Math.Max(1, (int)Math.Round(k.Width * s));
+                    int dh = Math.Max(1, (int)Math.Round(k.Height * s));
+                    int ox = (Canvas - dw) / 2;
+                    int oy = r.FillCrop ? 0 : (Canvas - dh) / 2;
+
+                    Bitmap final = new Bitmap(Canvas, Canvas, PixelFormat.Format32bppArgb);
+                    using (Graphics g = Graphics.FromImage(final))
+                    {
+                        g.CompositingQuality = CompositingQuality.HighQuality;
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        DrawScaled(g, k, new Rectangle(ox, oy, dw, dh));
+
+                        // 热点 = 图案右上角（点击区域），画高光标记
+                        int hx = Math.Max(1, Math.Min(Canvas - 2, ox + (int)Math.Round(r.HotFx * dw)));
+                        int hy = Math.Max(1, Math.Min(Canvas - 2, oy + (int)Math.Round(r.HotFy * dh)));
+                        DrawHotspotMarker(g, hx, hy);
+                        hotSpots.Add(new Point(hx, hy));
+                    }
+                    final.Save(Path.Combine(srcDir, r.Name + "_48.png"), ImageFormat.Png);
                     File.WriteAllBytes(Path.Combine(outDir, r.Role + ".cur"),
-                        CursorCore.BuildCurBytes(cur32, hx, hy));
-                    cur32.Save(Path.Combine(srcDir, r.Name + "_32.png"), ImageFormat.Png);
-                    Console.WriteLine(r.Name + " -> " + r.Role + ".cur  content " + k.Width + "x" + k.Height + "  hot(" + hx + "," + hy + ")");
+                        CursorCore.BuildCurBytes(final, hotSpots[hotSpots.Count - 1].X, hotSpots[hotSpots.Count - 1].Y));
+                    finals.Add(final);
+                    labels.Add(r.Role);
+                    Console.WriteLine(r.Name + " -> " + r.Role + ".cur  内容 " + dw + "x" + dh + "  热点(" +
+                        hotSpots[hotSpots.Count - 1].X + "," + hotSpots[hotSpots.Count - 1].Y + ")");
                 }
             }
 
-            // 方案预览图：正面全身小狗 128px，米色背景
+            // 方案预览图：最终光标（含高光标记）放大，米色背景
             using (Bitmap pv = new Bitmap(128, 128, PixelFormat.Format32bppArgb))
             using (Graphics g = Graphics.FromImage(pv))
             {
                 g.Clear(Color.FromArgb(245, 239, 228));
                 g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                DrawScaled(g, keyed[0], new Rectangle(10, 4, 108, 120));
+                DrawScaled(g, finals[0], new Rectangle(14, 4, 100, 120));
                 pv.Save(Path.Combine(outDir, "preview.png"), ImageFormat.Png);
             }
 
-            // QA 网格：各裁切 + 热点十字
-            using (Bitmap qa = new Bitmap(5 * 150, 180, PixelFormat.Format32bppArgb))
+            // QA 网格：最终 48px 光标 3 倍放大 + 热点红叉，深色背景检查可见性
+            using (Bitmap qa = new Bitmap(5 * 160, 200, PixelFormat.Format32bppArgb))
             using (Graphics g = Graphics.FromImage(qa))
             {
-                g.Clear(Color.White);
+                g.Clear(Color.FromArgb(70, 70, 80));
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
                 using (Font f = new Font("Segoe UI", 9f))
-                    for (int i = 0; i < keyed.Count; i++)
+                    for (int i = 0; i < finals.Count; i++)
                     {
-                        int ox = i * 150 + 5;
-                        DrawScaled(g, keyed[i], new Rectangle(ox, 5, 140, 140));
-                        int cx = ox + (int)(140.0 * hots[i].X / keyed[i].Width);
-                        int cy = 5 + (int)(140.0 * hots[i].Y / keyed[i].Height);
+                        int bx = i * 160 + 8;
+                        g.DrawImage(finals[i], new Rectangle(bx, 8, Canvas * 3, Canvas * 3),
+                            0, 0, Canvas, Canvas, GraphicsUnit.Pixel);
+                        int cx = bx + hotSpots[i].X * 3, cy = 8 + hotSpots[i].Y * 3;
                         using (Pen p = new Pen(Color.Red, 1.5f))
                         {
-                            g.DrawLine(p, cx - 8, cy, cx + 8, cy);
-                            g.DrawLine(p, cx, cy - 8, cx, cy + 8);
+                            g.DrawLine(p, cx - 9, cy, cx + 9, cy);
+                            g.DrawLine(p, cx, cy - 9, cx, cy + 9);
                         }
-                        g.DrawString(Regions[i].Role, f, Brushes.Black, ox, 148);
+                        g.DrawString(labels[i], f, Brushes.White, bx, 156);
                     }
-                qa.Save(Path.Combine(root, "tools", "dog", "qa.png"), ImageFormat.Png);
+                qa.Save(Path.Combine(root, "tools", "dog", "qa48.png"), ImageFormat.Png);
             }
         }
+        foreach (Bitmap b in finals) b.Dispose();
         Console.WriteLine("OK");
         return 0;
+    }
+
+    // 点击区域高光标记：柔光 + 深棕环 + 白核（浅色毛发和深色背景上都可见）
+    static void DrawHotspotMarker(Graphics g, int hx, int hy)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (SolidBrush b = new SolidBrush(Color.FromArgb(80, 255, 255, 255)))
+            g.FillEllipse(b, hx - 5.5f, hy - 5.5f, 11f, 11f);
+        using (Pen p = new Pen(Color.FromArgb(230, 74, 54, 38), 1.6f))
+            g.DrawEllipse(p, hx - 3.1f, hy - 3.1f, 6.2f, 6.2f);
+        using (SolidBrush b = new SolidBrush(Color.White))
+            g.FillEllipse(b, hx - 2.1f, hy - 2.1f, 4.2f, 4.2f);
     }
 
     // 高质量缩放（边缘镜像采样避免光晕）

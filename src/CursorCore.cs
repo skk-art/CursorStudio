@@ -184,7 +184,8 @@ namespace CursorStudio
             settings = LoadSettings();
         }
 
-        // 把编译进 exe 的内置方案解压到 %APPDATA%\CursorStudio\Schemes（已存在的文件不覆盖）
+        // 把编译进 exe 的内置方案解压到 %APPDATA%\CursorStudio\Schemes
+        // 内置资源文件始终覆盖（保证 exe 更新后资源同步）；方案名清单走 MergeManifest 保留用户自定义条目
         public static void EnsureSeeded()
         {
             EnsureDirs();
@@ -206,10 +207,9 @@ namespace CursorStudio
                     string scheme = rel.Substring(0, idx);
                     string file = rel.Substring(idx + 1);
                     string target = Path.Combine(Path.Combine(SchemesDir, scheme), file);
-                    if (File.Exists(target)) continue;
                     Directory.CreateDirectory(Path.GetDirectoryName(target));
                     using (Stream s = asm.GetManifestResourceStream(name))
-                    using (FileStream fs = new FileStream(target, FileMode.CreateNew, FileAccess.Write))
+                    using (FileStream fs = new FileStream(target, FileMode.Create, FileAccess.Write))
                     { byte[] buf = new byte[s.Length]; s.Read(buf, 0, buf.Length); fs.Write(buf, 0, buf.Length); }
                 }
                 catch { /* 单个资源失败不影响整体 */ }
@@ -913,6 +913,8 @@ namespace CursorStudio
                     return Probe();
                 case "probe2":
                     return Probe2();
+                case "probehot":
+                    return ProbeHot();
                 case "apply":
                     if (args.Length < 2) { CLine("用法: CursorStudio.exe apply <方案id>"); return 1; }
                     return ApplyScheme(args[1], true) ? Success("已应用方案: " + args[1]) : Fail("找不到方案: " + args[1]);
@@ -1033,6 +1035,58 @@ namespace CursorStudio
             }
             catch (Exception ex) { lines.Add("EXCEPTION: " + ex); }
             try { File.WriteAllLines(Path.Combine(AppDir, "probe2.log"), lines, Encoding.UTF8); } catch { }
+            foreach (string l in lines) TryConsole(l);
+            return 0;
+        }
+
+        // DPI 感知进程内的权威热点探测：加载 .cur 后报告位图尺寸与热点
+        static int ProbeHot()
+        {
+            EnsureInit();
+            List<string> lines = new List<string>();
+            try
+            {
+                string file = Path.Combine(SchemesDir, "puppy", "Arrow.cur");
+                IntPtr h = LoadCursorFromFileW(file);
+                ICONINFO ii = new ICONINFO();
+                if (GetIconInfo(h, ref ii))
+                {
+                    BITMAP bmp = new BITMAP();
+                    GetObjectW(ii.hbmColor, Marshal.SizeOf(typeof(BITMAP)), ref bmp);
+                    lines.Add("file=" + file);
+                    lines.Add("bitmap=" + bmp.bmWidth + "x" + Math.Abs(bmp.bmHeight) + "  hotspot=(" + ii.xHotspot + "," + ii.yHotspot + ")");
+                    if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
+                    if (ii.hbmMask != IntPtr.Zero) DeleteObject(ii.hbmMask);
+                }
+                DestroyCursor(h);
+
+                // 尺寸策略测试：32/48/64/72/96px 测试文件各自的加载位图尺寸
+                foreach (int size in new int[] { 32, 48, 64, 72, 96 })
+                {
+                    string testFile = Path.Combine(AppDir, "size_test_" + size + ".cur");
+                    using (Bitmap tb = new Bitmap(size, size, PixelFormat.Format32bppArgb))
+                    using (Graphics tg = Graphics.FromImage(tb))
+                    {
+                        tg.Clear(Color.FromArgb(200, 60, 60, 90));
+                        tg.FillEllipse(Brushes.Yellow, size / 2 - 2, size / 2 - 2, 4, 4);
+                        File.WriteAllBytes(testFile, BuildCurBytes(tb, size / 2, size / 2));
+                    }
+                    IntPtr th = LoadCursorFromFileW(testFile);
+                    ICONINFO ti = new ICONINFO();
+                    if (th != IntPtr.Zero && GetIconInfo(th, ref ti))
+                    {
+                        BITMAP tbmp = new BITMAP();
+                        GetObjectW(ti.hbmColor, Marshal.SizeOf(typeof(BITMAP)), ref tbmp);
+                        lines.Add("test " + size + "px -> bitmap " + tbmp.bmWidth + "x" + Math.Abs(tbmp.bmHeight) + "  hotspot=(" + ti.xHotspot + "," + ti.yHotspot + ")");
+                        if (ti.hbmColor != IntPtr.Zero) DeleteObject(ti.hbmColor);
+                        if (ti.hbmMask != IntPtr.Zero) DeleteObject(ti.hbmMask);
+                        DestroyCursor(th);
+                    }
+                    try { File.Delete(testFile); } catch { }
+                }
+            }
+            catch (Exception ex) { lines.Add("EXCEPTION: " + ex); }
+            try { File.WriteAllLines(Path.Combine(AppDir, "probehot.log"), lines, Encoding.UTF8); } catch { }
             foreach (string l in lines) TryConsole(l);
             return 0;
         }
