@@ -21,7 +21,8 @@ namespace CursorStudio.Gen
         {
             public string Id, Name;
             public Color Fill, Dark, Accent;
-            public Color Stroke { get { return Id == "classic" ? Dark : Fill; } }   // 线条类光标主色
+            // 浅色填充的方案（经典白/小狗奶油色）用深色描边才在浅色背景上可见
+            public Color Stroke { get { return (Id == "classic" || Id == "puppy") ? Dark : Fill; } }   // 线条类光标主色
             public Color Spin   { get { return Id == "classic" ? Accent : Fill; } } // 加载圈高亮色
         }
 
@@ -31,6 +32,10 @@ namespace CursorStudio.Gen
             new Scheme{ Id="mint",    Name="薄荷绿", Fill=Color.FromArgb(46,204,148),           Dark=Color.FromArgb(15,133,94),   Accent=Color.FromArgb(46,204,148) },
             new Scheme{ Id="night",   Name="暗夜紫", Fill=Color.FromArgb(167,139,250),          Dark=Color.FromArgb(104,77,212),  Accent=Color.FromArgb(167,139,250)},
             new Scheme{ Id="sunset",  Name="活力橙", Fill=Color.FromArgb(251,146,60),           Dark=Color.FromArgb(192,86,18),   Accent=Color.FromArgb(251,146,60) },
+            // 小狗汪汪：配色取自小狗角色设定图（蜂蜜棕/奶油色/深棕/腮红粉）
+            // 文本/调整大小等功能角色用该配色重绘经典形状；Arrow/Wait/AppStarting/Hand/Help
+            // 五个角色由 DogCursorGen 用设定图抠出的小狗本体覆盖
+            new Scheme{ Id="puppy",   Name="小狗汪汪", Fill=Color.FromArgb(243,227,201),        Dark=Color.FromArgb(74,54,38),    Accent=Color.FromArgb(232,154,164)},
         };
 
         static readonly string[] StaticRoles = {

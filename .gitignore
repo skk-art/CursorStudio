@@ -1,12 +1,14 @@
 # 构建产物
 dist/
-tools/GenCursors.exe
+tools/*.exe
 
 # 中间文件
 *.obj
 *.pdb
 *.log
 qa_sheet.png
+cursors/puppy_src/
+tools/dog/qa*.png
 
 # IDE / 系统
 .vs/

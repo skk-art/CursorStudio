@@ -27,7 +27,7 @@ for /f "delims=" %%f in ('dir /b /s /a-d cursors') do call :res "%%f"
 
 if not exist dist mkdir dist
 echo [3/3] compiling ...
-"%CSC%" -nologo -target:winexe -platform:AnyCPU -optimize+ -codepage:65001 -out:dist\CursorStudio.exe -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -win32manifest:src\app.manifest -win32icon:app.ico "@src\resources.rsp" src\CursorCore.cs src\Program.cs src\MainForm.cs
+"%CSC%" -nologo -target:winexe -platform:AnyCPU -optimize+ -codepage:65001 -out:dist\CursorStudio.exe -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll -win32manifest:src\app.manifest -win32icon:app.ico "@src\resources.rsp" src\CursorCore.cs src\Program.cs src\MainForm.cs src\EditorForm.cs
 if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1

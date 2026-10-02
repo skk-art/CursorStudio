@@ -100,10 +100,26 @@ namespace CursorStudio
             btnUpload.Click += OnUpload;
             Controls.Add(btnUpload);
 
+            Button btnEditor = new Button();
+            btnEditor.Text = "自定义光标编辑器…";
+            btnEditor.Location = new Point(452, 252);
+            btnEditor.Size = new Size(180, 28);
+            btnEditor.Click += delegate
+            {
+                using (EditorForm ef = new EditorForm())
+                {
+                    ef.Changed = delegate { BuildCards(); SyncFromState(); };
+                    ef.ShowDialog(this);
+                }
+                BuildCards();
+                SyncFromState();
+            };
+            Controls.Add(btnEditor);
+
             Button btnRestore = new Button();
             btnRestore.Text = "恢复系统默认光标";
-            btnRestore.Location = new Point(452, 252);
-            btnRestore.Size = new Size(180, 28);
+            btnRestore.Location = new Point(16, 286);
+            btnRestore.Size = new Size(220, 28);
             btnRestore.Click += delegate
             {
                 CursorCore.RestoreDefault(true);
@@ -112,11 +128,11 @@ namespace CursorStudio
             };
             Controls.Add(btnRestore);
 
-            chkAutostart = MakeCheck("开机自启（登录后自动应用当前方案）", new Point(16, 300));
+            chkAutostart = MakeCheck("开机自启（登录后自动应用当前方案）", new Point(16, 322));
             chkAutostart.CheckedChanged += chkAutostart_CheckedChanged_proxy;
-            chkWatchdog = MakeCheck("防还原守护（Windows 11 会话中途还原光标时自动重新应用，推荐开启）", new Point(16, 326));
+            chkWatchdog = MakeCheck("防还原守护（Windows 11 会话中途还原光标时自动重新应用，推荐开启）", new Point(16, 348));
             chkWatchdog.CheckedChanged += chkWatchdog_CheckedChanged_proxy;
-            chkRestoreOnExit = MakeCheck("退出程序时恢复系统默认光标", new Point(16, 352));
+            chkRestoreOnExit = MakeCheck("退出程序时恢复系统默认光标", new Point(16, 374));
             chkRestoreOnExit.CheckedChanged += chkRestoreOnExit_CheckedChanged_proxy;
 
             status = new Label();
@@ -140,6 +156,13 @@ namespace CursorStudio
 
         void BuildCards()
         {
+            // 释放旧卡片的预览图，避免反复重建时累积 GDI 句柄
+            foreach (Control c in cards.Controls)
+                foreach (Control c2 in c.Controls)
+                {
+                    PictureBox pb = c2 as PictureBox;
+                    if (pb != null && pb.Image != null) pb.Image.Dispose();
+                }
             cards.Controls.Clear();
             cardById.Clear();
             foreach (KeyValuePair<string, string> kv in CursorCore.GetSchemes())
@@ -178,6 +201,10 @@ namespace CursorStudio
                     {
                         SyncFromState();
                         UpdateStatus("已应用方案：" + CursorCore.GetSchemes()[id]);
+                    }
+                    else
+                    {
+                        UpdateStatus("该方案还没有「正常选择」光标，暂时无法整体应用。");
                     }
                 };
                 card.Click += click;

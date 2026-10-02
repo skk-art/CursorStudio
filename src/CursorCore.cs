@@ -198,9 +198,7 @@ namespace CursorStudio
                     if (rel == "manifest.txt")
                     {
                         string dest = Path.Combine(SchemesDir, "manifest.txt");
-                        using (Stream s = asm.GetManifestResourceStream(name))
-                        using (FileStream fs = new FileStream(dest, FileMode.Create, FileAccess.Write))
-                        { byte[] buf = new byte[s.Length]; s.Read(buf, 0, buf.Length); fs.Write(buf, 0, buf.Length); }
+                        using (Stream s = asm.GetManifestResourceStream(name)) MergeManifest(s, dest);
                         continue;
                     }
                     int idx = rel.IndexOf('_');
@@ -216,6 +214,33 @@ namespace CursorStudio
                 }
                 catch { /* 单个资源失败不影响整体 */ }
             }
+        }
+
+        // 内置 manifest 与磁盘上的 manifest 合并：保留用户自定义方案的行，仅补充缺失的内置方案。
+        // （旧版每次启动直接覆盖，会把编辑器保存的自定义方案条目抹掉。）
+        static void MergeManifest(Stream s, string dest)
+        {
+            if (s == null) return;
+            List<string> lines = new List<string>();
+            if (File.Exists(dest)) lines.AddRange(File.ReadAllLines(dest, Encoding.UTF8));
+            HashSet<string> have = new HashSet<string>();
+            foreach (string l in lines)
+            {
+                int p = l.IndexOf('|');
+                have.Add((p > 0 ? l.Substring(0, p) : l).Trim());
+            }
+            using (StreamReader r = new StreamReader(s, Encoding.UTF8))
+            {
+                string line;
+                while ((line = r.ReadLine()) != null)
+                {
+                    if (line.Trim().Length == 0) continue;
+                    int p = line.IndexOf('|');
+                    string key = (p > 0 ? line.Substring(0, p) : line).Trim();
+                    if (!have.Contains(key)) { lines.Add(line); have.Add(key); }
+                }
+            }
+            File.WriteAllLines(dest, lines, Encoding.UTF8);
         }
 
         // ---------------- 设置 (INI) ----------------
@@ -295,6 +320,111 @@ namespace CursorStudio
         }
 
         public static string SchemeDir(string id) { return Path.Combine(SchemesDir, id); }
+
+        // ---------------- 自定义方案（编辑器后端） ----------------
+
+        public static readonly string[] BuiltinSchemeIds = { "classic", "sakura", "mint", "night", "sunset" };
+
+        public static bool IsBuiltinScheme(string id) { return Array.IndexOf(BuiltinSchemeIds, id) >= 0; }
+
+        // 用户输入的方案名 → 目录/manifest 用的 id；避开内置方案与保留字 "custom"（单角色自定义的哨兵值）
+        public static string MakeSchemeId(string name)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (char c in (name ?? "").Trim())
+            {
+                if (c == '|' || c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || char.IsControl(c)) continue;
+                sb.Append(c);
+            }
+            string id = sb.ToString().Trim();
+            if (id.Length == 0) id = "我的方案";
+            if (id.Length > 40) id = id.Substring(0, 40).Trim();
+            if (IsBuiltinScheme(id) || id == "custom")
+            {
+                for (int i = 2; ; i++)
+                {
+                    string cand = id + "_" + i;
+                    if (!IsBuiltinScheme(cand) && cand != "custom") { id = cand; break; }
+                }
+            }
+            return id;
+        }
+
+        // 把一张图片作为某角色写入自定义方案目录并登记 manifest，返回生成的 .cur 路径。
+        // 同方案同一角色重复保存即覆盖——这就是“修改已有方案”的路径。
+        public static string SaveCursorToScheme(string imageFile, string role, string schemeId, int size, int hotX, int hotY)
+        {
+            EnsureInit();
+            string dir = SchemeDir(schemeId);
+            Directory.CreateDirectory(dir);
+            string dest = Path.Combine(dir, role + ".cur");
+            BuildCursorFile(imageFile, size, hotX, hotY, dest);
+            EnsureManifestEntry(schemeId);
+            return dest;
+        }
+
+        // manifest 中新增/更新一行 "id|id"（显示名与 id 一致），保留其余行
+        static void EnsureManifestEntry(string id)
+        {
+            string manifest = Path.Combine(SchemesDir, "manifest.txt");
+            List<string> lines = new List<string>();
+            if (File.Exists(manifest)) lines.AddRange(File.ReadAllLines(manifest, Encoding.UTF8));
+            bool found = false;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                int p = lines[i].IndexOf('|');
+                if ((p > 0 ? lines[i].Substring(0, p) : lines[i]).Trim() == id) { lines[i] = id + "|" + id; found = true; }
+            }
+            if (!found) lines.Add(id + "|" + id);
+            File.WriteAllLines(manifest, lines, Encoding.UTF8);
+        }
+
+        // 删除自定义方案（内置方案拒绝删除）；若它正在使用中则清空当前方案并清理注册表指向
+        public static bool DeleteScheme(string id)
+        {
+            EnsureInit();
+            if (IsBuiltinScheme(id)) return false;
+            string dir = SchemeDir(id);
+            if (!Directory.Exists(dir)) return false;
+            bool wasCurrent = settings.CurrentScheme == id;
+            Directory.Delete(dir, true);
+            try
+            {
+                string manifest = Path.Combine(SchemesDir, "manifest.txt");
+                if (File.Exists(manifest))
+                {
+                    List<string> keep = new List<string>();
+                    foreach (string l in File.ReadAllLines(manifest, Encoding.UTF8))
+                    {
+                        int p = l.IndexOf('|');
+                        if ((p > 0 ? l.Substring(0, p) : l).Trim() != id) keep.Add(l);
+                    }
+                    File.WriteAllLines(manifest, keep, Encoding.UTF8);
+                }
+            }
+            catch { }
+            // 清理注册表中仍指向该方案目录的角色值，避免登录后加载已删除的文件
+            try
+            {
+                string prefix = dir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(CursorsKeyPath, true))
+                {
+                    if (k != null)
+                    {
+                        bool changed = false;
+                        foreach (string name in k.GetValueNames())
+                        {
+                            string v = Convert.ToString(k.GetValue(name, ""));
+                            if (name != "" && v.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) { k.DeleteValue(name, false); changed = true; }
+                        }
+                        if (changed) RefreshFromRegistry();
+                    }
+                }
+            }
+            catch { }
+            if (wasCurrent) { settings.CurrentScheme = ""; SaveSettings(); }
+            return true;
+        }
 
         static string RoleFile(string dir, string role)
         {
@@ -679,8 +809,26 @@ namespace CursorStudio
         // 把任意图片转成 32x32 的 .cur（保持长宽比居中，透明背景），热点按角色取默认值
         public static string ConvertPngToCur(string imageFile, string role, string destFile)
         {
+            int[] hp = PngHotspots.ContainsKey(role) ? PngHotspots[role] : new int[] { 0, 0 };
+            return BuildCursorFile(imageFile, 32, hp[0], hp[1], destFile);
+        }
+
+        // 角色默认热点（PngHotspots 以 32px 为基准，按输出尺寸等比缩放并夹到范围内）
+        public static int[] DefaultHotspot(string role, int size)
+        {
+            int[] hp = PngHotspots.ContainsKey(role) ? PngHotspots[role] : new int[] { 0, 0 };
+            int x = Math.Max(0, Math.Min(size - 1, (int)Math.Round(hp[0] * size / 32.0)));
+            int y = Math.Max(0, Math.Min(size - 1, (int)Math.Round(hp[1] * size / 32.0)));
+            return new[] { x, y };
+        }
+
+        // 把任意图片转成 size x size 的 .cur（保持长宽比居中，透明背景），热点由调用方指定
+        public static string BuildCursorFile(string imageFile, int size, int hotX, int hotY, string destFile)
+        {
+            if (size < 8) size = 8;
+            if (size > 128) size = 128;
             using (Bitmap src = new Bitmap(imageFile))
-            using (Bitmap bmp = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
+            using (Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb))
             {
                 using (Graphics g = Graphics.FromImage(bmp))
                 {
@@ -688,18 +836,18 @@ namespace CursorStudio
                     g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                     g.SmoothingMode = SmoothingMode.AntiAlias;
-                    double ratio = Math.Min(32.0 / Math.Max(1, src.Width), 32.0 / Math.Max(1, src.Height));
+                    double ratio = Math.Min(size / Math.Max(1.0, src.Width), size / Math.Max(1.0, src.Height));
                     int w = Math.Max(1, (int)Math.Round(src.Width * ratio));
                     int h = Math.Max(1, (int)Math.Round(src.Height * ratio));
                     using (ImageAttributes ia = new ImageAttributes())
                     {
                         ia.SetWrapMode(WrapMode.TileFlipXY);
-                        g.DrawImage(src, new Rectangle((32 - w) / 2, (32 - h) / 2, w, h),
+                        g.DrawImage(src, new Rectangle((size - w) / 2, (size - h) / 2, w, h),
                             0, 0, src.Width, src.Height, GraphicsUnit.Pixel, ia);
                     }
                 }
-                int[] hp = PngHotspots.ContainsKey(role) ? PngHotspots[role] : new int[] { 0, 0 };
-                File.WriteAllBytes(destFile, BuildCurBytes(bmp, hp[0], hp[1]));
+                File.WriteAllBytes(destFile, BuildCurBytes(bmp,
+                    Math.Max(0, Math.Min(size - 1, hotX)), Math.Max(0, Math.Min(size - 1, hotY))));
             }
             return destFile;
         }
@@ -889,15 +1037,19 @@ namespace CursorStudio
             return 0;
         }
 
-        // 把默认（当前注册表语义）的光标内容直接写回槽位——SPI 失效时的恢复兜底
+        // 把默认光标直接写回槽位——SPI 失效时的恢复兜底。
+        // 注意不能用 LoadCursor(NULL,OCR_x) 取“默认内容”：槽位已被我们替换时它返回的就是我们的内容。
+        // 所以从用户备份里的 aero 文件路径直接加载。
         static void DirectSetDefaults()
         {
+            Dictionary<string, string> snap = ReadBackup();
             foreach (KeyValuePair<string, uint> kv in OcrIds)
             {
-                IntPtr def = LoadCursor(IntPtr.Zero, (IntPtr)kv.Value);
-                if (def == IntPtr.Zero) continue;
-                IntPtr copy = CopyIcon(def);
-                if (copy != IntPtr.Zero && !SetSystemCursor(copy, kv.Value)) DestroyCursor(copy);
+                string file;
+                if (!snap.TryGetValue(kv.Key, out file) || file.Length == 0 || !File.Exists(file)) continue;
+                IntPtr h = LoadCursorFromFileW(file);
+                if (h == IntPtr.Zero) continue;
+                if (!SetSystemCursor(h, kv.Value)) DestroyCursor(h);
             }
         }
 
@@ -1016,6 +1168,26 @@ namespace CursorStudio
                 // 6. 恢复自定义 PNG 方案（注册表 + 槽位）路径
                 ApplyCustom(testCur, "Arrow", false);
                 T(ReadCursorsRegistry()["Arrow"] == Path.GetFullPath(testCur), "ApplyCustom 写注册表", "");
+
+                // 7. 自定义方案保存 / 删除（编辑器后端）
+                string schemePng = Path.Combine(AppDir, "selftest_scheme_src.png");
+                using (Bitmap tb = new Bitmap(20, 20, PixelFormat.Format32bppArgb))
+                {
+                    using (Graphics g = Graphics.FromImage(tb))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.FillRectangle(Brushes.SeaGreen, 2, 2, 16, 16);
+                    }
+                    tb.Save(schemePng, ImageFormat.Png);
+                }
+                T(MakeSchemeId("classic") != "classic" && MakeSchemeId("") == "我的方案",
+                    "MakeSchemeId 避开内置方案并给默认名", MakeSchemeId("classic"));
+                string saved = SaveCursorToScheme(schemePng, "IBeam", "selftest_scheme", 48, 5, 7);
+                T(File.Exists(saved) && LoadCursorFromFileW(saved) != IntPtr.Zero, "SaveCursorToScheme 生成 48px .cur 可加载", saved);
+                T(GetSchemes().ContainsKey("selftest_scheme"), "自定义方案已登记进方案列表", "");
+                T(!IsBuiltinScheme("selftest_scheme") && DeleteScheme("selftest_scheme"), "DeleteScheme 删除自定义方案", "");
+                T(!Directory.Exists(SchemeDir("selftest_scheme")) && !GetSchemes().ContainsKey("selftest_scheme"),
+                    "删除后目录与方案列表已清理", "");
             }
             catch (Exception ex)
             {
@@ -1026,6 +1198,7 @@ namespace CursorStudio
                 // 恢复测试前的注册表与槽位，不遗留任何状态（SPI 失效时直接把默认光标写回槽位）
                 try
                 {
+                    if (Directory.Exists(SchemeDir("selftest_scheme"))) DeleteScheme("selftest_scheme");
                     WriteRegistryExact(savedReg);
                     if (!RefreshFromRegistry()) DirectSetDefaults();
                     settings.CurrentScheme = savedSettings.CurrentScheme;
